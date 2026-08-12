@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockmgr"
+version = "0.1.0"
+description = "국내 주식 지수·테마 ETF·원자재 동향 분석과 매매 추천"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "pykrx>=1.0.45",
+    "yfinance>=0.2.40",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+stockmgr = "stockmgr.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["stockmgr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::FutureWarning"]

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 시세 캐시와 개인 원장, 생성 리포트는 버전관리 대상이 아니다
+data/cache/
+data/holdings.json
+reports/
+
+.DS_Store
+.idea/
+.vscode/

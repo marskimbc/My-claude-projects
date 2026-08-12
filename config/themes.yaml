@@ -1,0 +1,126 @@
+# 테마 ETF 유니버스 정의
+#
+# 국내 ETF 는 신규 상장/상장폐지가 잦아 종목코드를 하드코딩하면 금방 깨진다.
+# 그래서 여기서는 "이름 패턴"으로 테마를 정의하고, 실행 시점에 KRX 전체 ETF
+# 목록(pykrx)에서 패턴에 맞는 종목을 찾아 유니버스를 만든다.
+#   - include : 종목명에 이 단어 중 하나라도 있으면 후보
+#   - exclude : 후보라도 이 단어가 있으면 제외 (테마별 추가 제외어)
+#   - pinned  : 이름 패턴과 무관하게 항상 포함할 종목코드
+#
+# 공통 제외어(global_exclude)는 파생/헤지형 상품을 걸러내기 위한 것이다.
+
+global_exclude:
+  - 인버스
+  - 레버리지
+  - 2X
+  - 채권
+  - 단기자금
+  - 금리
+  - CD
+  - KOFR
+  - 커버드콜
+  - 배당프리미엄
+
+benchmarks:
+  # pykrx 지수 코드 (1xxx = KOSPI 계열, 2xxx = KOSDAQ 계열)
+  kospi:
+    code: "1001"
+    label: 코스피
+    market: KOSPI
+  kospi200:
+    code: "1028"
+    label: 코스피200
+    market: KOSPI
+  kosdaq:
+    code: "2001"
+    label: 코스닥
+    market: KOSDAQ
+  kosdaq150:
+    code: "2203"
+    label: 코스닥150
+    market: KOSDAQ
+
+themes:
+  quantum:
+    label: 양자컴퓨팅
+    include: [양자, 퀀텀, Quantum]
+    exclude: []
+  renewable:
+    label: 신재생에너지
+    include: [신재생, 태양광, 풍력, 수소, 2차전지, 친환경, 그린, 탄소]
+    exclude: [소재]
+  defense:
+    label: 방산
+    include: [방산, 우주항공, K-방산, 항공우주]
+    exclude: []
+  shipbuilding:
+    label: 조선
+    include: [조선, 해운, 선박]
+    exclude: []
+  power:
+    label: 전력/원자력
+    include: [전력, 원자력, 원전, 에너지인프라, 전선]
+    exclude: []
+  ai:
+    label: 인공지능
+    include: [AI, 인공지능, 반도체, 데이터센터, 클라우드, 로봇]
+    exclude: []
+  infra:
+    label: 인프라
+    include: [인프라, 건설, 리츠, 부동산, SOC, 도시]
+    exclude: []
+
+# 원자재 / 대체자산 — 국내 상장 ETF 로 먼저 찾고, 없으면 macro(해외) 로 대체
+commodities:
+  gold:
+    label: 금
+    include: [골드, 금현물, KRX금]
+    macro: "GC=F"
+  silver:
+    label: 은
+    include: [은선물, 실버]
+    macro: "SI=F"
+  copper:
+    label: 구리
+    include: [구리, 코퍼]
+    macro: "HG=F"
+  realestate:
+    label: 부동산/리츠
+    include: [리츠, 부동산]
+    macro: "VNQ"
+  oil:
+    label: 원유
+    include: [원유, WTI]
+    macro: "CL=F"
+
+# 매크로 지표 (yfinance). 국내 증시 방향성 판단용 보조 변수.
+macro:
+  usdkrw:
+    symbol: "KRW=X"
+    label: 원/달러
+    # 원화 약세(상승)는 국내 증시에 부정적 → 역방향 해석
+    invert: true
+  dxy:
+    symbol: "DX-Y.NYB"
+    label: 달러인덱스
+    invert: true
+  ust10y:
+    symbol: "^TNX"
+    label: 미국10년물
+    invert: true
+  vix:
+    symbol: "^VIX"
+    label: VIX
+    invert: true
+  sp500:
+    symbol: "^GSPC"
+    label: S&P500
+    invert: false
+  nasdaq:
+    symbol: "^IXIC"
+    label: 나스닥
+    invert: false
+  sox:
+    symbol: "^SOX"
+    label: 필라델피아반도체
+    invert: false
