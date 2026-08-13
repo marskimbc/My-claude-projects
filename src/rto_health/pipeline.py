@@ -23,6 +23,29 @@ from .trend import ChangePoint, RULEstimate, detect_change_points, estimate_rul,
 
 
 @dataclass
+class Prepared:
+    """채점 직전까지 끝난 중간 상태 (패스 1의 결과).
+
+    동급기 비교는 전 설비의 일 집계가 나와야 계산할 수 있으므로, 파이프라인을
+    여기서 한 번 끊는다. 단일 설비 분석은 두 단계를 연달아 호출할 뿐이다.
+    """
+
+    config: Config
+    dataset: Dataset
+    baseline: baseline_mod.Baseline
+    refs: NormalizationRefs
+    daily: pd.DataFrame
+
+    @property
+    def dp_ratio(self) -> pd.Series:
+        """정규화 차압의 베이스라인 대비 비율 — 동급기 비교의 기준량."""
+        base = self.baseline.ref("dp_norm")
+        if "dp_norm" not in self.daily.columns or not base or not pd.notna(base) or base <= 0:
+            return pd.Series(dtype=float)
+        return self.daily["dp_norm"] / base
+
+
+@dataclass
 class Analysis:
     """분석 결과 전체."""
 
@@ -57,11 +80,23 @@ def analyze(
     config: Config | None = None,
     *,
     config_dir: str | Path | None = None,
+    resample: str | None = None,
 ) -> Analysis:
-    """운전 데이터 한 건을 끝까지 분석한다."""
+    """운전 데이터 한 건을 끝까지 분석한다 (전처리 + 채점)."""
+    return score_prepared(prepare(source, config, config_dir=config_dir, resample=resample))
+
+
+def prepare(
+    source: str | Path | pd.DataFrame,
+    config: Config | None = None,
+    *,
+    config_dir: str | Path | None = None,
+    resample: str | None = None,
+) -> Prepared:
+    """패스 1 — 로딩부터 일 집계까지. 채점 직전에서 멈춘다."""
     cfg = config or load_config(config_dir)
 
-    ds = load_operating_data(source, cfg)
+    ds = load_operating_data(source, cfg, resample=resample)
     ds = preprocess.clean(ds)
     ds = preprocess.mark_steady_state(ds, cfg)
 
@@ -82,7 +117,22 @@ def analyze(
             "(min_flow_ratio, min_comb_temp_c)이 설비 실제 운전범위와 맞는지 확인하세요."
         )
 
-    ind = indicators.compute(daily, base, cfg, ds)
+    return Prepared(config=cfg, dataset=ds, baseline=base, refs=refs, daily=daily)
+
+
+def score_prepared(
+    prep: Prepared,
+    *,
+    peer_dp_ratio: pd.Series | None = None,
+) -> Analysis:
+    """패스 3 — 지표 산출부터 고장모드 판정까지.
+
+    Args:
+        peer_dp_ratio: 동일 계열 동급기의 정규화 차압 비율 중앙값. 있으면 A6 이 채점된다.
+    """
+    cfg, ds, base, refs, daily = prep.config, prep.dataset, prep.baseline, prep.refs, prep.daily
+
+    ind = indicators.compute(daily, base, cfg, ds, peer_dp_ratio=peer_dp_ratio)
     result = scoring.score(ind, cfg)
 
     # --- 추세: 정규화 차압 비율 위에서 변화점과 잔여여유를 본다 -----------------

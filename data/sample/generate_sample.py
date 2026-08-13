@@ -54,58 +54,104 @@ def _smooth_noise(rng: np.random.Generator, n: int, scale: float, span: int) -> 
     return np.convolve(raw, kernel, mode="same") * np.sqrt(span)
 
 
-def _fouling_profile(scenario: str, day: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """시나리오별 막힘 진행도 f 와 채널링 정도 c 를 만든다.
+def _fouling_profile(
+    scenario: str,
+    day: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    days: float = DAYS,
+    severity: float = 1.0,
+    noise_span: int = 288,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """시나리오별 열화 상태 변수를 만든다.
 
-    f: 0 = 세정 직후, 1.0 ≈ 설계 한계 수준의 균일 막힘
-    c: 0 = 균일, 1.0 = 다수 섹터 폐쇄로 심한 편류
+    f: 균일 막힘.  0 = 세정 직후, 1.0 ≈ 설계 한계 수준
+    c: 채널링.     0 = 균일, 1.0 = 다수 섹터 폐쇄로 심한 편류
+    b: 바이패스.   축열층을 우회하는 비율 — 씰 누설·축열재 침하.
+       **차압을 올리지 않으면서** 열회수효율만 떨어뜨린다는 점이 f·c 와 결정적으로 다르다.
+       이 구분이 안 되면 세정해도 소용없는 고장에 정지 시간을 쓰게 된다.
     """
     n = len(day)
+    b = np.zeros(n)
 
     if scenario == "normal":
-        # 1년간 완만한 자연 오염. bake-out 으로 대부분 회복.
-        f = 0.10 * (day / DAYS)
+        # 완만한 자연 오염. bake-out 으로 대부분 회복.
+        f = 0.10 * (day / days)
         c = np.full(n, 0.01)
 
     elif scenario == "gradual_fouling":
         # 미세 분진이 꾸준히 누적. 후반으로 갈수록 가속(유로 축소 → 유속 증가 → 포집 증가).
-        x = day / DAYS
+        x = day / days
         f = 0.40 * (x ** 1.40)
         c = 0.12 * (x ** 2.0)
 
     elif scenario == "rapid_plugging":
-        # 200일 근처 공정 이상으로 고농도 VOC 유입 → 폴리머 응축 → 급격한 국부 폐쇄.
-        onset = 205.0
-        x = np.clip((day - onset) / (DAYS - onset), 0.0, None)
-        f = 0.09 * (day / DAYS) + 1.25 * (x ** 1.25)
+        # 후반 공정 이상으로 고농도 VOC 유입 → 폴리머 응축 → 급격한 국부 폐쇄.
+        onset = days * 0.562
+        x = np.clip((day - onset) / max(days - onset, 1.0), 0.0, None)
+        f = 0.09 * (day / days) + 1.25 * (x ** 1.25)
         c = 0.02 + 0.80 * (x ** 1.1)
+
+    elif scenario == "seal_leak":
+        # 로터리밸브 씰 마모 — 차압은 정상인데 가스가 축열층을 우회한다.
+        onset = days * 0.45
+        x = np.clip((day - onset) / max(days - onset, 1.0), 0.0, None)
+        f = 0.08 * (day / days)
+        c = np.full(n, 0.01)
+        b = 0.85 * (x ** 1.1)
 
     else:
         raise ValueError(f"알 수 없는 시나리오: {scenario}")
 
+    f = f * severity
+    c = c * severity
+    b = b * severity
+
     # bake-out 회복 반영 (누적 감소분을 이후 구간에 적용)
     f = f.copy()
     for bd in BAKEOUT_DAYS:
+        if bd >= days:
+            continue
         mask = day >= bd
         if not mask.any():
             continue
         level = f[mask][0]
         f[mask] -= level * BAKEOUT_RECOVERY
 
-    f = np.clip(f + _smooth_noise(rng, n, 0.004, 288), 0.0, None)
-    c = np.clip(c + _smooth_noise(rng, n, 0.003, 288), 0.0, None)
-    return f, c
+    f = np.clip(f + _smooth_noise(rng, n, 0.004, noise_span), 0.0, None)
+    c = np.clip(c + _smooth_noise(rng, n, 0.003, noise_span), 0.0, None)
+    return f, c, np.clip(b, 0.0, None)
 
 
-def build_scenario(scenario: str, seed: int = 42) -> pd.DataFrame:
-    """한 시나리오의 전체 운전 데이터를 생성한다."""
+def build_scenario(
+    scenario: str,
+    seed: int = 42,
+    *,
+    freq_min: int = FREQ_MIN,
+    days: int = DAYS,
+    q_ref: float = Q_REF,
+    dp_ref: float = DP_REF,
+    voc_base: float = 300.0,
+    ter_clean: float = TER_CLEAN,
+    severity: float = 1.0,
+    start: str = START,
+) -> pd.DataFrame:
+    """한 시나리오의 전체 운전 데이터를 생성한다.
+
+    설비마다 풍량·기준차압·VOC 농도가 다르므로 전부 인자로 뺐다. 20대 fleet 생성기가
+    같은 물리 모델을 그대로 재사용한다 — 물리식이 두 벌로 갈라지지 않게 하기 위함이다.
+    """
     rng = np.random.default_rng(seed)
 
-    ts = pd.date_range(START, periods=DAYS * 24 * 60 // FREQ_MIN, freq=f"{FREQ_MIN}min")
+    ts = pd.date_range(start, periods=int(days * 24 * 60 // freq_min), freq=f"{freq_min}min")
     n = len(ts)
-    day = np.arange(n) * FREQ_MIN / 1440.0
+    day = np.arange(n) * freq_min / 1440.0
     hour_of_day = ts.hour + ts.minute / 60.0
     is_weekend = ts.dayofweek >= 5
+
+    # 저주파 노이즈 폭을 '일수' 기준으로 환산 — 샘플링 주기가 바뀌어도 같은 시간 규모를 유지한다
+    def span(days_of_span: float) -> int:
+        return max(3, int(days_of_span * 1440 / freq_min))
 
     # --- 외기온: 계절 + 일교차 ---------------------------------------------
     ambient = (
@@ -118,65 +164,76 @@ def build_scenario(scenario: str, seed: int = 42) -> pd.DataFrame:
     # --- 생산 부하(풍량): 주야/주말 패턴 + 완만한 변동 ------------------------
     load = 1.0 - 0.18 * np.sin(2 * np.pi * (hour_of_day - 4) / 24.0)
     load = np.where(is_weekend, load * 0.72, load)
-    load = load * (1.0 + _smooth_noise(rng, n, 0.02, 144))
-    flow = Q_REF * np.clip(load, 0.3, 1.35)
+    load = load * (1.0 + _smooth_noise(rng, n, 0.02, span(1)))
+    flow = q_ref * np.clip(load, 0.3, 1.35)
 
     # --- 정지 구간 ----------------------------------------------------------
     running = np.ones(n, dtype=bool)
     for start_day, dur_h in SHUTDOWNS:
-        s = int(start_day * 1440 / FREQ_MIN)
-        e = s + int(dur_h * 60 / FREQ_MIN)
+        if start_day >= days:
+            continue
+        s = int(start_day * 1440 / freq_min)
+        e = s + max(1, int(dur_h * 60 / freq_min))
         running[s:e] = False
         # 정지 후 1시간은 승온 과도구간
-        running_warm_end = e + int(60 / FREQ_MIN)
+        running_warm_end = e + max(1, int(60 / freq_min))
         flow[s:running_warm_end] *= 0.15
 
-    flow = np.where(running, flow, rng.uniform(0, 40, n))
+    flow = np.where(running, flow, rng.uniform(0, 0.05 * q_ref, n))
 
     # --- 유입가스 온도 / VOC 농도 --------------------------------------------
-    t_in = ambient + 22.0 + _smooth_noise(rng, n, 1.5, 72)
-    voc_in = np.clip(300.0 + 90.0 * (load - 1.0) * 3 + _smooth_noise(rng, n, 25.0, 216), 20, None)
+    t_in = ambient + 22.0 + _smooth_noise(rng, n, 1.5, span(0.5))
+    voc_in = np.clip(
+        voc_base + 0.3 * voc_base * (load - 1.0) * 3 + _smooth_noise(rng, n, voc_base * 0.083, span(1.5)),
+        max(5.0, voc_base * 0.07),
+        None,
+    )
 
-    f, c = _fouling_profile(scenario, day, rng)
+    f, c, b = _fouling_profile(
+        scenario, day, rng, days=days, severity=severity, noise_span=span(2)
+    )
 
     # rapid_plugging: 막힘을 유발한 VOC 스파이크를 실제로 데이터에 넣는다
     if scenario == "rapid_plugging":
-        for spike_day in (198, 201, 204):
-            s = int(spike_day * 1440 / FREQ_MIN)
-            e = s + int(14 * 60 / FREQ_MIN)
+        for frac in (0.542, 0.551, 0.559):
+            s = int(frac * days * 1440 / freq_min)
+            e = s + max(1, int(14 * 60 / freq_min))
             voc_in[s:e] *= rng.uniform(3.2, 4.4)
 
     # --- 차압: 물리식 그대로 ------------------------------------------------
     # 막힘계수: 균일 막힘은 선형, 채널링은 유효 단면 축소로 제곱 효과
+    # 바이패스(b)는 여기에 들어가지 않는다 — 우회 경로는 저항을 만들지 않기 때문이다.
+    # 이 한 줄이 '막힘'과 '씰 누설'을 데이터 상에서 갈라놓는다.
     plug_factor = 1.0 + 1.55 * f + 1.30 * c**2
-    dp_clean = DP_REF * (flow / Q_REF) ** FLOW_EXPONENT * ((t_in + 273.15) / T_REF_K)
+    dp_clean = dp_ref * (flow / q_ref) ** FLOW_EXPONENT * ((t_in + 273.15) / T_REF_K)
     dp_bed = dp_clean * plug_factor
     dp_bed = np.where(running, dp_bed, dp_bed * 0.05)
     # 채널링 시 맥동 증가
     dp_bed = dp_bed * (1.0 + rng.normal(0, 0.006 + 0.085 * c, n))
-    dp_total = dp_bed + 35.0 * (flow / Q_REF) ** 1.8 + rng.normal(0, 1.2, n)
+    dp_total = dp_bed + 0.44 * dp_ref * (flow / q_ref) ** 1.8 + rng.normal(0, 1.2, n)
 
     # --- 송풍기: 높아진 저항을 이겨내기 위해 회전수/개도 상승 -------------------
-    fan_hz = np.clip(HZ_REF * (flow / Q_REF) * plug_factor**0.32 + rng.normal(0, 0.15, n), 0.0, 60.0)
+    fan_hz = np.clip(HZ_REF * (flow / q_ref) * plug_factor**0.32 + rng.normal(0, 0.15, n), 0.0, 60.0)
     fan_amp = np.clip(AMP_REF * (fan_hz / HZ_REF) ** 2.1 + rng.normal(0, 0.8, n), 0.0, None)
     damper_pct = np.clip(45.0 + 42.0 * (plug_factor - 1.0) + rng.normal(0, 0.8, n), 5, 100)
 
     # --- 열회수효율과 온도 프로파일 ------------------------------------------
-    ter = TER_CLEAN - 0.055 * f - 0.16 * c
+    # 바이패스는 축열층을 그냥 지나치므로 효율 손실이 가장 크다
+    ter = ter_clean - 0.055 * f - 0.16 * c - 0.18 * b
     ter = np.clip(ter + rng.normal(0, 0.0018, n), 0.55, 0.99)
 
     t_comb_sp = np.full(n, T_COMB_SP)
-    instability = 1.6 + 22.0 * c + 4.0 * f
+    instability = 1.6 + 22.0 * c + 4.0 * f + 9.0 * b
     t_comb = t_comb_sp + rng.normal(0, instability, n)
     t_comb = np.where(running, t_comb, np.clip(t_comb - 600, 60, None))
 
     t_stack = t_comb - ter * (t_comb - t_in)
 
-    # 섹터별 출구온도: 채널링 시 특정 섹터군이 냉/온으로 갈린다
+    # 섹터별 출구온도: 채널링·바이패스 시 특정 섹터군이 냉/온으로 갈린다
     sector_bias = np.array([-1.0, -0.9, -1.15, 0.35, 0.5, 0.62, 0.7, 0.45, 0.3, -0.35, -0.6, 0.28])
     sectors = {}
     for i in range(SECTOR_COUNT):
-        offset = sector_bias[i] * (58.0 * c) + rng.normal(0, 2.2, n)
+        offset = sector_bias[i] * (58.0 * c + 42.0 * b) + rng.normal(0, 2.2, n)
         sectors[f"TT_SECTOR_{i + 1:02d}"] = t_stack + 26.0 + offset
 
     # --- 연료: 열수지 (손실 보충 − VOC 자체 발열) -----------------------------
@@ -184,10 +241,13 @@ def build_scenario(scenario: str, seed: int = 42) -> pd.DataFrame:
     voc_heat = 0.042 * flow * voc_in / 1000.0
     fuel_flow = np.clip(heat_loss - voc_heat + rng.normal(0, 0.6, n), 0.0, None)
     fuel_flow = np.where(running, fuel_flow, 0.0)
-    burner_duty = np.clip(fuel_flow / 55.0 * 100.0 + rng.normal(0, 0.9, n), 0, 100)
+    burner_duty = np.clip(fuel_flow / (0.065 * q_ref) * 100.0 + rng.normal(0, 0.9, n), 0, 100)
 
-    # --- 배출농도: 편류로 체류시간이 짧아지면 상승 ----------------------------
-    voc_out = np.clip(7.5 * (1.0 + 2.8 * c) * (1.0 + 0.25 * f) + rng.normal(0, 0.6, n), 0.2, None)
+    # --- 배출농도: 편류·우회로 체류시간이 짧아지면 상승 ------------------------
+    voc_out = np.clip(
+        0.025 * voc_base * (1.0 + 2.8 * c + 2.0 * b) * (1.0 + 0.25 * f) + rng.normal(0, 0.6, n),
+        0.2, None,
+    )
 
     df = pd.DataFrame(
         {

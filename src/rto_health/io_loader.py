@@ -42,15 +42,21 @@ SCALAR_VARS = (
 
 @dataclass
 class Config:
-    """3종 설정 파일을 묶어 들고 다니는 컨테이너."""
+    """설정 파일을 묶어 들고 다니는 컨테이너."""
 
     tags: dict[str, Any]
     weights: dict[str, Any]
     events: dict[str, Any]
+    fleet: dict[str, Any] = field(default_factory=dict)   # fleet.yaml (20대 레지스트리)
 
     @property
     def equipment(self) -> dict[str, Any]:
         return self.events.get("equipment", {})
+
+    @property
+    def baseline_spec(self) -> dict[str, Any]:
+        """설비별 베이스라인 지정 (period / manual). fleet 경로에서만 채워진다."""
+        return self.events.get("baseline") or {}
 
     @property
     def design_flow(self) -> float:
@@ -67,6 +73,8 @@ class Config:
     def maintenance_events(self) -> pd.DataFrame:
         """정비 이력을 날짜순 DataFrame 으로 반환."""
         rows = self.events.get("maintenance_events") or []
+        if isinstance(rows, dict):   # fleet.yaml 은 설비별 dict — 단일 설비 경로에서는 비운다
+            rows = []
         if not rows:
             return pd.DataFrame(columns=["date", "type", "note"])
         df = pd.DataFrame(rows)
@@ -100,14 +108,65 @@ def load_config(
     tags: str | Path | None = None,
     weights: str | Path | None = None,
     events: str | Path | None = None,
+    fleet: str | Path | None = None,
 ) -> Config:
-    """config 디렉토리에서 tags/weights/events 를 읽는다."""
+    """config 디렉토리에서 tags/weights/events(/fleet) 를 읽는다.
+
+    fleet.yaml 은 없어도 된다 — 없으면 단일 설비 모드로 동작한다.
+    """
     base = Path(config_dir) if config_dir else CONFIG_DIR
+    fleet_path = Path(fleet) if fleet else base / "fleet.yaml"
     return Config(
         tags=load_yaml(tags or base / "tags.yaml"),
         weights=load_yaml(weights or base / "weights.yaml"),
         events=load_yaml(events or base / "events.yaml"),
+        fleet=load_yaml(fleet_path) if fleet_path.exists() else {},
     )
+
+
+def _read_one(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
+        return pd.read_excel(path)
+    return pd.read_csv(path)
+
+
+def read_frames(
+    source: str | Path | list[str | Path],
+    *,
+    timestamp_col: str = "TIMESTAMP",
+) -> pd.DataFrame:
+    """파일 하나 · 파일 목록 · 폴더를 받아 하나의 프레임으로 병합한다.
+
+    1시간 단위로 데이터를 계속 누적하는 운영을 전제로 한다. 월별 export 를 폴더에
+    쌓아 두면 그대로 읽히고, 구간이 겹치면 **나중 파일이 이깁니다**(재추출본 우선).
+    """
+    if isinstance(source, (list, tuple)):
+        paths = [Path(p) for p in source]
+    else:
+        path = Path(source)
+        if path.is_dir():
+            paths = sorted(
+                p for p in path.iterdir()
+                if p.suffix.lower() in (".csv", ".xlsx", ".xlsm", ".xls")
+            )
+            if not paths:
+                raise ValueError(f"'{path}' 안에 읽을 수 있는 데이터 파일이 없습니다.")
+        else:
+            paths = [path]
+
+    frames = [_read_one(p) for p in paths]
+    if len(frames) == 1:
+        return frames[0]
+
+    merged = pd.concat(frames, ignore_index=True)
+    if timestamp_col in merged.columns:
+        merged[timestamp_col] = pd.to_datetime(merged[timestamp_col])
+        merged = (
+            merged.sort_values(timestamp_col)
+            .drop_duplicates(subset=[timestamp_col], keep="last")
+            .reset_index(drop=True)
+        )
+    return merged
 
 
 def _sector_source_names(tag_cfg: dict[str, Any]) -> list[str]:

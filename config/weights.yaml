@@ -49,6 +49,9 @@ steady_state:
 trend:
   ewma_span_hours: 24
   slope_windows_days: [7, 30, 90]
+  # Theil-Sen 기울기 계산 간격(일). 30일 창의 기울기는 하루 사이에 급변하지 않으므로
+  # 띄엄띄엄 계산하고 보간해도 결과가 같다. 20대를 돌릴 때 속도 차이가 크다.
+  slope_stride_days: 3
   cusum_k_sigma: 0.5           # CUSUM 여유(허용 드리프트)
   # CUSUM 임계. 3개 시나리오로 튜닝한 값 — 6.0 에서 정상 운전 오알람 0건이면서
   # 급성 막힘을 발생 10일 내 검출한다. 낮추면 조기검출↑ 오알람↑.
@@ -71,7 +74,7 @@ indicators:
   A1:
     group: A
     name: 정규화 베드 차압
-    points: 18
+    points: 16
     metric: dp_norm_ratio
     unit: 배
     description: 풍량·온도 보정 차압의 베이스라인 대비 비율. 막힘의 가장 직접적인 증거.
@@ -82,7 +85,7 @@ indicators:
   A2:
     group: A
     name: 차압 상승 기울기
-    points: 10
+    points: 9
     metric: dp_norm_slope_per_day
     unit: 배/일
     description: 30일 Theil-Sen robust 기울기. 현재 수준보다 "얼마나 빨리 나빠지는가".
@@ -93,7 +96,7 @@ indicators:
   A3:
     group: A
     name: 송풍기 부하 상승
-    points: 8
+    points: 7
     metric: fan_load_ratio
     unit: 배
     description: 동일 풍량 기준 인버터 주파수(또는 전류)의 베이스라인 대비 비율.
@@ -116,13 +119,28 @@ indicators:
   A5:
     group: A
     name: 차압 변동성
-    points: 4
+    points: 3
     metric: dp_cv
     unit: 변동계수
     description: 차압 이동표준편차/평균. 국부 폐쇄·채널링 시 맥동이 커진다.
     onset: 0.03
     severe: 0.15
     requires: [dp_bed]
+
+  A6:
+    group: A
+    name: 동급기 대비 차압 편차
+    points: 5
+    metric: peer_dp_ratio
+    unit: 배
+    # 이 지표는 베이스라인이 오염돼 있어도 유효하다. A1(자기 베이스라인 대비)은 기준
+    # 자체가 틀리면 무력하지만, 옆 호기와의 비교는 그 영향을 받지 않는다. 누적관리를
+    # 오염 상태에서 시작한 설비의 안전장치 역할을 한다.
+    # 동일 계열이 2대 미만이거나 비교 불가 시 자동 제외되고 배점이 재배분된다.
+    description: 동일 계열·동일 사양 병렬 호기의 정규화 차압 중앙값 대비 비율.
+    onset: 1.10
+    severe: 1.60
+    requires: [dp_bed, flow]
 
   # ===== B군. 열교환 성능 — 25점 ===========================================
   B1:
@@ -322,6 +340,39 @@ failure_modes:
       - 베드 내부 육안 점검 — 충진 높이 저하, 세라믹 파손 확인
       - 지지 그레이팅 및 하부 배출부 점검
       - 파손 축열재 잔해가 하류에 쌓였는지 확인
+
+  # --- 20대 병렬 운영에서만 판정 가능한 패턴 --------------------------------
+  # 우선순위 12: 고장 기전을 특정하는 규칙(채널링·씰누설·유실)보다는 뒤,
+  # 일반적인 균일 오염(20)보다는 앞. "무엇이 문제인가"가 먼저고 "어느 호기부터"가 그 다음이다.
+  - id: peer_outlier
+    priority: 12
+    name: 동급기 대비 단독 이상 — 해당 호기 우선 정비
+    conditions:
+      A6: {min: 0.35}
+    cause: 같은 계열 동일 사양 병렬 운전 중 이 호기만 유동저항이 높다. 공통 원인이 아니라 이 설비 개별 문제다.
+    actions:
+      - 동일 계열 내 정비 우선순위 1순위로 배정
+      - 정상 호기와 유입 배관·댐퍼 개도·전처리 계통을 나란히 비교 점검
+      - 자기 베이스라인 대비(A1)는 낮은데 이 항목만 높다면 베이스라인 구간이 이미 오염됐을 가능성 — config/fleet.yaml 의 baselines 에 정상 구간(period) 또는 설계값(manual)을 지정할 것
+      - 동일 계열 정상 호기의 차압을 임시 기준으로 삼아 열화 폭을 재확인
+
+  # 우선순위 18: 균일 오염(20)보다 앞선다. 둘 다 성립할 때 "계열 전체가 함께
+  # 나빠졌다"는 정보가 조치 방향(개별 정비 → 유입측 조사)을 바꾸기 때문이다.
+  - id: fleet_wide_fouling
+    priority: 18
+    name: 계열 전체 동반 열화 — 공통 원인 의심
+    # A1 임계는 uniform_fouling 과 동일하게 둔다. 같은 증거 수준에서 '동급기와 함께
+    # 나빠졌는가'(A6)만으로 두 판정이 갈리게 하기 위함이다. 임계가 서로 다르면
+    # 그 사이 구간의 설비만 이유 없이 다른 진단을 받는다.
+    conditions:
+      A1: {min: 0.30}
+      A6: {max: 0.15}
+    cause: 계열 전체가 비슷한 속도로 나빠졌다. 개별 설비 고장이 아니라 유입측 공통 원인일 가능성이 높다.
+    actions:
+      - 공정측 배출 조건 변화 확인 (원료 변경, 생산품목 전환, 배치 조건 변경)
+      - 공통 전처리 설비 점검 (집진기·스크러버·미스트 제거기)
+      - 계열 전체 bake-out 을 동시에 계획 — 개별 대응은 비효율적
+      - 유입가스 성분 분석 의뢰 (실리콘·응축성 유기물)
 
   - id: burner_or_control
     priority: 30

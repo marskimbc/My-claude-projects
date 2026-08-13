@@ -61,17 +61,36 @@ def theil_sen_slope(series: pd.Series) -> tuple[float, float, float]:
     return float(slope), float(lo), float(hi)
 
 
-def rolling_slope(series: pd.Series, window_days: int) -> pd.Series:
-    """직전 window_days 구간의 Theil-Sen 기울기를 매일 산출한다."""
+def rolling_slope(series: pd.Series, window_days: int, *, stride: int = 1) -> pd.Series:
+    """직전 window_days 구간의 Theil-Sen 기울기를 산출한다.
+
+    Theil-Sen 은 표본 쌍을 전부 훑으므로 매일 계산하면 비싸다. 30일 창의 기울기는
+    하루 사이에 급변하지 않으므로 stride 일 간격으로 계산하고 사이를 보간해도
+    정보 손실이 없다. 20대를 한꺼번에 돌릴 때 체감 차이가 크다.
+    """
     s = series.dropna()
     out = pd.Series(np.nan, index=series.index, dtype=float)
     if s.empty:
         return out
 
-    for ts in s.index:
+    stride = max(1, int(stride))
+    min_points = max(5, window_days // 4)
+    # 마지막 시점은 반드시 포함한다 — 현재 채점에 쓰이는 값이다
+    positions = sorted({*range(0, len(s), stride), len(s) - 1})
+
+    for pos in positions:
+        ts = s.index[pos]
         window = s.loc[ts - pd.Timedelta(days=window_days) : ts]
-        if len(window) >= max(5, window_days // 4):
+        if len(window) >= min_points:
             out.loc[ts] = theil_sen_slope(window)[0]
+
+    if stride > 1:
+        computed = out.notna()
+        if computed.any():
+            out = out.interpolate(method="time", limit_area="inside")
+            # 창이 안 차서 앞쪽이 비는 구간은 그대로 NaN 으로 둔다(증거 없음 = 무감점)
+            first = out.index[computed][0]
+            out.loc[out.index < first] = np.nan
     return out
 
 

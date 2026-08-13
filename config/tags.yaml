@@ -5,7 +5,44 @@
 #   - source 가 null 이면 "해당 태그 미보유"로 간주하고, 그 태그를 쓰는 지표는
 #     자동으로 배점에서 제외된다(잔여 지표로 100점 재배분).
 #   - unit 은 참고용이며 loader 가 단위 변환을 하지는 않는다.
+#
+# 20대를 한 파일로 받을 때는 아래 `fleet` 블록의 규칙으로 설비별 컬럼을 분해한 뒤,
+# 각 설비 데이터를 이 `source` 이름으로 되돌려 동일한 경로로 처리한다.
 # ---------------------------------------------------------------------------
+
+# --- 20대 통합 파일에서 설비별 컬럼을 찾는 규칙 -----------------------------
+fleet:
+  # 실제 태그명 = tag_pattern 에 설비 ID 와 아래 suffix 를 끼워 넣은 것
+  #   예) VRT-A31101A + DP_BED  →  VRT-A31101A_DP_BED
+  tag_pattern: "{equipment}_{suffix}"
+
+  # 설비명이 붙지 않고 전 설비가 공유하는 컬럼
+  shared:
+    timestamp: TIMESTAMP
+
+  suffixes:
+    dp_bed: DP_BED
+    dp_total: DP_TOTAL
+    flow: FLOW
+    fan_hz: FAN_HZ
+    fan_amp: FAN_AMP
+    damper_pct: DAMPER
+    t_comb: COMB_PV
+    t_comb_sp: COMB_SP
+    t_in: T_INLET
+    t_stack: T_STACK
+    fuel_flow: FUEL
+    burner_duty: BURNER_DUTY
+    voc_in: VOC_IN
+    voc_out: VOC_OUT
+    ambient_temp: AMBIENT
+
+  # 섹터별 온도: VRT-A31101A_SECTOR_01 … _12
+  sector_suffix_prefix: SECTOR_
+
+  # 특정 설비의 특정 태그만 이름이 다를 때 (현장 예외 대응)
+  #   VRT-A31103C: {dp_bed: OLD_TAG_DPBED}
+  equipment_overrides: {}
 
 timestamp:
   source: TIMESTAMP

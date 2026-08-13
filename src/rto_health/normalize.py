@@ -99,12 +99,24 @@ def resolve_refs(
         source = "default"
 
     base = ds.df.loc[baseline_mask]
+    if base.empty:
+        # 베이스라인을 수동 입력한 경우 실측 구간이 없다. 지정값을 쓰고,
+        # 없으면 정상 운전 전체의 중앙값으로 기준 조건을 잡는다.
+        manual = (config.baseline_spec or {}).get("manual") or {}
+        steady = ds.df[ds.df.get("is_steady", pd.Series(True, index=ds.df.index)).fillna(False)]
+        base = steady if not steady.empty else ds.df
+        fallback_flow = manual.get("flow", float(base["flow"].median()))
+        fallback_temp = manual.get("t_in", float(base["t_in"].median()))
+    else:
+        fallback_flow = float(base["flow"].median())
+        fallback_temp = float(base["t_in"].median())
+
     ref_flow = phys.get("ref_flow_cmm")
     if ref_flow is None:
-        ref_flow = float(base["flow"].median())
+        ref_flow = fallback_flow
     ref_temp = phys.get("ref_gas_temp_c")
     if ref_temp is None:
-        ref_temp = float(base["t_in"].median())
+        ref_temp = fallback_temp
 
     return NormalizationRefs(
         flow_exponent=n,

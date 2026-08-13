@@ -17,8 +17,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "app"))
 
+import fleet_views  # noqa: E402
 from theme import DARK, GRADE_COLOR, GRADE_ICON, LIGHT, apply_layout, group_color  # noqa: E402
 
+from rto_health import fleet as fleet_mod  # noqa: E402
 from rto_health import indicators as ind_mod  # noqa: E402
 from rto_health import scoring  # noqa: E402
 from rto_health.io_loader import load_config  # noqa: E402
@@ -27,6 +29,7 @@ from rto_health.report import build_markdown  # noqa: E402
 from rto_health.trend import ewma  # noqa: E402
 
 SAMPLE_DIR = PROJECT_ROOT / "data" / "sample"
+FLEET_SAMPLE = SAMPLE_DIR / "fleet.csv"
 SAMPLE_LABELS = {
     "normal": "정상 운전",
     "gradual_fouling": "완만한 막힘 진행",
@@ -61,7 +64,21 @@ def _analyze_path(path: str):
 
 
 def _ensure_samples() -> bool:
-    return any(SAMPLE_DIR.glob("*.csv"))
+    return any(p.name != "fleet.csv" for p in SAMPLE_DIR.glob("*.csv"))
+
+
+# 20대 분석 결과는 무겁고 직렬화할 이유가 없으므로 객체째 보관한다
+@st.cache_resource(show_spinner="20대 설비 분석 중… (최초 1회, 약 10초)")
+def _fleet_from_path(path: str):
+    return fleet_mod.analyze_fleet(path, config_dir=PROJECT_ROOT / "config")
+
+
+@st.cache_resource(show_spinner="20대 설비 분석 중… (최초 1회, 약 10초)")
+def _fleet_from_bytes(payload: bytes, name: str):
+    import io
+
+    reader = pd.read_excel if name.lower().endswith((".xlsx", ".xls", ".xlsm")) else pd.read_csv
+    return fleet_mod.analyze_fleet(reader(io.BytesIO(payload)), config_dir=PROJECT_ROOT / "config")
 
 
 # ---------------------------------------------------------------------------
@@ -194,32 +211,69 @@ def chart_metric(series, title, pal, *, onset=None, severe=None, unit="", color_
 # ---------------------------------------------------------------------------
 # 화면
 # ---------------------------------------------------------------------------
+def _sidebar_fleet_source():
+    """20대 통합 데이터를 고르게 한다."""
+    uploaded = st.file_uploader(
+        "20대 통합 데이터 (CSV / Excel)", type=["csv", "xlsx", "xls"],
+        help="태그명에 설비 ID 가 포함된 통합 파일. 여러 달치를 폴더에 쌓아둔 경우 CLI 를 쓰세요.",
+    )
+    if uploaded is not None:
+        return _fleet_from_bytes(uploaded.getvalue(), uploaded.name)
+
+    if FLEET_SAMPLE.exists():
+        st.caption("가상 샘플 데이터입니다. 실제 운전 데이터를 업로드하세요.")
+        return _fleet_from_path(str(FLEET_SAMPLE))
+
+    st.warning(
+        "가상 데이터가 없습니다. 먼저 실행하세요:\n\n"
+        "`python data/sample/generate_fleet_sample.py`"
+    )
+    return None
+
+
 def main() -> None:
     pal = palette()
 
     st.title("🏭 RTO 축열재 막힘 사전예측")
-    st.caption("Can Type (Rotary 1-Can) RTO · 세라믹 축열재 막힘 진행도를 100점으로 정량화합니다")
+    st.caption("Can Type (Rotary 1-Can) RTO 20대 · 세라믹 축열재 막힘 진행도를 100점으로 정량화합니다")
 
-    # --- 사이드바: 데이터 선택 --------------------------------------------
     with st.sidebar:
         st.header("데이터")
-        uploaded = st.file_uploader("운전 데이터 (CSV / Excel)", type=["csv", "xlsx", "xls"])
+        mode = st.radio("분석 범위", ["20대 통합", "단일 설비"], horizontal=True)
 
+        fleet = None
         analysis = None
-        if uploaded is not None:
-            analysis = _analyze_bytes(uploaded.getvalue(), uploaded.name)
-        elif _ensure_samples():
-            choice = st.selectbox(
-                "샘플 시나리오", list(SAMPLE_LABELS),
-                format_func=lambda k: SAMPLE_LABELS[k], index=1,
-            )
-            analysis = _analyze_path(str(SAMPLE_DIR / f"{choice}.csv"))
-            st.caption("합성 샘플 데이터입니다. 실제 운전 데이터를 업로드하세요.")
+
+        if mode == "20대 통합":
+            fleet = _sidebar_fleet_source()
+            if fleet is not None and fleet.units:
+                st.divider()
+                st.header("설비 선택")
+                st.caption("상세 탭에서 볼 설비입니다.")
+                ranked = fleet.ranking()
+                order = list(ranked["설비"]) if not ranked.empty else sorted(fleet.units)
+                selected = st.selectbox(
+                    "설비", order,
+                    format_func=lambda e: f"{e}  ({ranked.set_index('설비').loc[e, '점수']:.0f}점)"
+                    if not ranked.empty else e,
+                )
+                analysis = fleet.units[selected]
         else:
-            st.warning("샘플이 없습니다. 먼저 실행하세요:\n\n`python data/sample/generate_sample.py`")
+            uploaded = st.file_uploader("단일 설비 데이터", type=["csv", "xlsx", "xls"])
+            if uploaded is not None:
+                analysis = _analyze_bytes(uploaded.getvalue(), uploaded.name)
+            elif _ensure_samples():
+                choice = st.selectbox(
+                    "샘플 시나리오", list(SAMPLE_LABELS),
+                    format_func=lambda k: SAMPLE_LABELS[k], index=1,
+                )
+                analysis = _analyze_path(str(SAMPLE_DIR / f"{choice}.csv"))
+                st.caption("합성 샘플 데이터입니다.")
+            else:
+                st.warning("샘플이 없습니다:\n\n`python data/sample/generate_sample.py`")
 
     if analysis is None:
-        st.info("좌측에서 운전 데이터를 업로드하거나 샘플 시나리오를 선택하세요.")
+        st.info("좌측에서 운전 데이터를 업로드하거나 샘플을 선택하세요.")
         return
 
     cfg = analysis.config
@@ -227,6 +281,7 @@ def main() -> None:
     grades = cfg.weights.get("grades") or []
 
     with st.sidebar:
+        st.divider()
         st.header("기준일")
         dates = analysis.daily.index
         as_of = st.slider(
@@ -237,11 +292,90 @@ def main() -> None:
     snap = analysis.snapshot(pd.Timestamp(as_of).normalize())
     guide = analysis.guidance(snap.date)
     ind = analysis.indicators
+    unit_name = cfg.equipment.get("name", "설비")
 
-    tabs = st.tabs(["종합", "감점 기여도", "변화추이", "점검 가이드", "설정"])
+    tab_names = (
+        ["전체 현황", "계열 비교"] if fleet is not None else []
+    ) + ["종합", "감점 기여도", "변화추이", "점검 가이드", "설정"]
+    tabs = st.tabs(tab_names)
+    offset = 2 if fleet is not None else 0
 
-    # ===== 1. 종합 =========================================================
-    with tabs[0]:
+    # ===== 전체 현황 (20대) =================================================
+    if fleet is not None:
+        with tabs[0]:
+            fleet_views.render_kpi_row(fleet, pal)
+            if fleet.failed:
+                st.warning(
+                    "**분석 실패 설비** — 나머지 설비 결과는 정상입니다.\n\n"
+                    + "\n".join(f"- {k}: {v}" for k, v in fleet.failed.items())
+                )
+            st.divider()
+            st.markdown("##### 계열별 현황")
+            fleet_views.render_series_grid(fleet, pal)
+            st.divider()
+            st.markdown("##### 정비 우선순위")
+            fleet_views.render_priority_table(fleet)
+
+            assumed = [e for e, a in fleet.units.items() if a.baseline.is_assumed]
+            if assumed:
+                st.info(
+                    f"**베이스라인 자동 추정 {len(assumed)}대** — 정비 이력도 지정 구간도 없어 "
+                    "데이터 앞부분을 정상으로 가정했습니다. 이미 오염된 상태에서 수집을 "
+                    "시작했다면 막힘이 과소평가됩니다. `config/fleet.yaml` 의 `baselines` 에 "
+                    "정상 구간(period)이나 설계값(manual)을 지정하십시오. "
+                    "그 전까지는 **동급 대비** 열이 더 믿을 만합니다."
+                )
+
+    # ===== 계열 비교 ========================================================
+    if fleet is not None:
+        with tabs[1]:
+            st.caption(
+                "같은 계열은 동일 사양 병렬 운전이므로 서로가 가장 좋은 기준입니다. "
+                "**자기 베이스라인이 오염돼 있어도 이 비교는 유효합니다** — 한 대만 튀면 그 호기 문제이고, "
+                "다 같이 나빠졌으면 설비가 아니라 유입측을 봐야 합니다."
+            )
+            series_id = st.selectbox(
+                "계열", fleet.series_ids,
+                format_func=lambda s: f"{s} ({len(fleet.series_units(s))}대)",
+                index=fleet.series_ids.index(fleet.specs[selected].series_id),
+            )
+            st.plotly_chart(fleet_views.chart_series_overlay(fleet, series_id, pal), width="stretch")
+
+            peer_fig = fleet_views.chart_peer_deviation(fleet, series_id, pal)
+            left, right = st.columns([1, 1])
+            with left:
+                if peer_fig is not None:
+                    st.plotly_chart(peer_fig, width="stretch")
+                else:
+                    st.info("이 계열은 비교 대상 호기가 없어 동급기 편차를 산출할 수 없습니다.")
+            with right:
+                st.markdown("##### 계열 내 판정")
+                rows = []
+                for eq_id in sorted(fleet.series_units(series_id), key=lambda e: fleet.specs[e].unit):
+                    unit_analysis = fleet.units.get(eq_id)
+                    if unit_analysis is None:
+                        rows.append({"호기": fleet.specs[eq_id].unit, "점수": None, "판정": "분석 불가"})
+                        continue
+                    unit_snap = unit_analysis.snapshot()
+                    rows.append({
+                        "호기": fleet.specs[eq_id].unit,
+                        "점수": round(unit_snap.score, 1),
+                        "등급": f"{GRADE_ICON.get(unit_snap.grade, '')} {unit_snap.grade}",
+                        "판정": unit_analysis.guidance()["headline"],
+                    })
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+                if len(fleet.series_units(series_id)) == 2:
+                    st.caption(
+                        "⚠️ 2호기 계열은 비교 대상이 1대뿐이라 5호기 계열보다 근거가 약합니다. "
+                        "두 대가 함께 나빠지면 동급기 비교로는 드러나지 않습니다."
+                    )
+
+    # ===== 종합 =============================================================
+    with tabs[offset + 0]:
+        st.markdown(f"#### {unit_name}")
+        if analysis.baseline.warning:
+            st.warning(analysis.baseline.warning)
         c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1.4])
         color = GRADE_COLOR.get(snap.grade, pal.muted)
         c1.markdown(
@@ -286,7 +420,7 @@ def main() -> None:
             st.markdown(f"- {item}")
 
     # ===== 2. 감점 기여도 ===================================================
-    with tabs[1]:
+    with tabs[offset + 1]:
         left, right = st.columns([1, 1])
         with left:
             st.plotly_chart(chart_group_summary(snap, ind, pal, groups), width='stretch')
@@ -308,7 +442,7 @@ def main() -> None:
         st.dataframe(scoring.score_table(snap, ind), hide_index=True, width='stretch')
 
     # ===== 3. 변화추이 =====================================================
-    with tabs[2]:
+    with tabs[offset + 2]:
         st.caption(
             "지표는 모두 **정규화 후**의 값입니다. 차압은 풍량·온도로 보정했으므로 "
             "생산량 변동이 아니라 막힘만 반영합니다. 붉은 점선은 CUSUM 이 검출한 악화 시작 시점입니다."
@@ -347,7 +481,7 @@ def main() -> None:
             st.success("검출된 변화 시점이 없습니다 — 열화 속도가 일정하게 유지되고 있습니다.")
 
     # ===== 4. 점검 가이드 ===================================================
-    with tabs[3]:
+    with tabs[offset + 3]:
         if not guide["all_modes"]:
             st.success(f"판정된 특이 고장모드가 없습니다. 등급별 기본 조치: **{snap.action}**")
         for i, mode in enumerate(guide["all_modes"]):
@@ -370,8 +504,45 @@ def main() -> None:
             st.markdown(report_md)
 
     # ===== 5. 설정 =========================================================
-    with tabs[4]:
-        st.markdown("##### 분석 조건")
+    with tabs[offset + 4]:
+        if fleet is not None:
+            st.markdown("##### 설비 사양 (config/fleet.yaml)")
+            st.caption(
+                "⚠️ 풍량·설계차압·VOC 농도는 **자리표시자**입니다. 실제 사양으로 교체해야 "
+                "운전 한계 도달 예측과 정상운전 구간 판정이 맞습니다."
+            )
+            st.dataframe(
+                pd.DataFrame([{
+                    "설비": s.equipment_id,
+                    "계열": s.series_id,
+                    "종류": s.label,
+                    "설계풍량(CMM)": s.spec.get("design_flow_cmm"),
+                    "설계차압(mmH2O)": s.spec.get("design_max_dp_mmh2o"),
+                    "설계VOC(ppm)": s.spec.get("design_voc_ppm"),
+                    "세정주기(h)": s.spec.get("recommended_cleaning_interval_h"),
+                    "축열재": s.spec.get("media_type"),
+                    "베이스라인": (
+                        fleet.units[s.equipment_id].baseline.source_label
+                        if s.equipment_id in fleet.units else "—"
+                    ),
+                } for s in fleet.specs.values()]),
+                hide_index=True, width="stretch",
+            )
+
+            st.markdown("##### 태그 자동 감지")
+            st.caption(
+                "매핑이 틀리면 지표가 조용히 빠져 점수만 이상해집니다. 온보딩 시 여기서 먼저 확인하세요."
+            )
+            if not fleet.detection.empty:
+                problems = fleet.detection[fleet.detection["상태"] != "✅ 정상"]
+                if problems.empty:
+                    st.success(f"20대 전 설비의 태그가 모두 확인되었습니다 ({len(fleet.detection)}대).")
+                else:
+                    st.error(f"**{len(problems)}대에서 태그 누락**이 발견되었습니다.")
+                st.dataframe(fleet.detection, hide_index=True, width="stretch")
+            st.divider()
+
+        st.markdown(f"##### 분석 조건 — {unit_name}")
         refs, base = analysis.refs, analysis.baseline
         source_label = {"fitted": "실측 회귀 피팅", "config": "설정 고정값",
                         "default": "축열재 형상별 기본값"}[refs.exponent_source]

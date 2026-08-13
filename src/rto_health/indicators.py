@@ -93,8 +93,15 @@ def compute_raw_metrics(
     baseline: Baseline,
     config: Config,
     ds: Dataset,
+    *,
+    peer_dp_ratio: pd.Series | None = None,
 ) -> pd.DataFrame:
-    """일 단위 집계에서 15개 지표의 raw metric 을 계산한다."""
+    """일 단위 집계에서 지표의 raw metric 을 계산한다.
+
+    Args:
+        peer_dp_ratio: 동일 계열 동급기의 정규화 차압 비율 중앙값(일별).
+            fleet 분석에서만 주어지며, 없으면 A6 을 산출하지 않는다.
+    """
     out = pd.DataFrame(index=daily.index)
     equip = config.equipment
     trend_cfg = config.weights.get("trend", {})
@@ -104,7 +111,7 @@ def compute_raw_metrics(
         ratio = _safe_ratio(daily["dp_norm"], baseline.ref("dp_norm"))
         out["A1"] = ratio
         # 30일 창의 robust 기울기 (비율/일)
-        out["A2"] = rolling_slope(ratio, 30)
+        out["A2"] = rolling_slope(ratio, 30, stride=int(trend_cfg.get("slope_stride_days", 3)))
 
     if "fan_hz_ratio" in daily.columns:
         out["A3"] = daily["fan_hz_ratio"]
@@ -118,6 +125,11 @@ def compute_raw_metrics(
 
     if "dp_cv" in daily.columns:
         out["A5"] = daily["dp_cv"]
+
+    # A6 동급기 대비 — 자기 베이스라인이 오염돼 있어도 유효한 유일한 유동저항 지표
+    if peer_dp_ratio is not None and "A1" in out.columns:
+        peer = peer_dp_ratio.reindex(out.index)
+        out["A6"] = (out["A1"] / peer.where(peer > 1e-6)).replace([np.inf, -np.inf], np.nan)
 
     # ===== B군. 열교환 성능 ==================================================
     if "ter" in daily.columns:
@@ -175,6 +187,7 @@ def compute(
     *,
     min_valid_ratio: float = 0.3,
     raw: pd.DataFrame | None = None,
+    peer_dp_ratio: pd.Series | None = None,
 ) -> IndicatorSet:
     """raw metric → 열화도 → 배점 재배분까지 수행한다.
 
@@ -184,7 +197,7 @@ def compute(
     """
     specs = load_specs(config)
     if raw is None:
-        raw = compute_raw_metrics(daily, baseline, config, ds)
+        raw = compute_raw_metrics(daily, baseline, config, ds, peer_dp_ratio=peer_dp_ratio)
 
     degradation = pd.DataFrame(index=daily.index)
     excluded: dict[str, str] = {}

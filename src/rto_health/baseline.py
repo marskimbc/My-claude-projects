@@ -45,6 +45,22 @@ class Baseline:
     reset_date: pd.Timestamp | None = None
     reset_type: str | None = None
     n_samples: int = 0
+    source: str = "auto"        # 'period' | 'manual' | 'maintenance' | 'auto'
+    warning: str | None = None
+
+    #: 베이스라인 출처가 신뢰할 만한지 — 'auto' 는 데이터 앞부분을 정상으로 **가정**한 것이다
+    @property
+    def is_assumed(self) -> bool:
+        return self.source == "auto"
+
+    @property
+    def source_label(self) -> str:
+        return {
+            "period": "구간 지정",
+            "manual": "수동 입력",
+            "maintenance": "정비 이력 기준",
+            "auto": "⚠️ 자동 추정",
+        }.get(self.source, self.source)
 
     def ref(self, key: str, default: float = float("nan")) -> float:
         value = self.refs.get(key, default)
@@ -79,19 +95,37 @@ def select_baseline(ds: Dataset, config: Config) -> Baseline:
     steady = df.get("is_steady", pd.Series(True, index=df.index)).fillna(False)
     data_start, data_end = df["timestamp"].min(), df["timestamp"].max()
 
-    # 데이터 구간 안에 있는 가장 최근의 리셋성 정비를 찾는다
-    events = config.maintenance_events()
+    # --- ② 수동 입력이 있으면 데이터와 무관하게 그 값을 기준으로 쓴다 -----------
+    # 데이터에 깨끗한 구간이 아예 없는 설비(누적관리를 오염 상태에서 시작한 경우)를 위한 경로.
+    manual = (config.baseline_spec or {}).get("manual")
+    if manual:
+        return _manual_baseline(ds, manual, data_start)
+
+    # --- ① 구간 지정이 있으면 그 구간을 정상으로 본다 --------------------------
+    period = (config.baseline_spec or {}).get("period")
+    source = "auto"
     reset_date: pd.Timestamp | None = None
     reset_type: str | None = None
-    if not events.empty:
-        resets = events[events["type"].isin(reset_types)]
-        resets = resets[(resets["date"] >= data_start - pd.Timedelta(days=1)) & (resets["date"] <= data_end)]
-        if not resets.empty:
-            reset_date = resets["date"].iloc[-1]
-            reset_type = str(resets["type"].iloc[-1])
 
-    start = max(reset_date, data_start) if reset_date is not None else data_start
-    end = start + pd.Timedelta(days=days)
+    if period and period.get("start"):
+        start = pd.Timestamp(period["start"])
+        end = pd.Timestamp(period["end"]) if period.get("end") else start + pd.Timedelta(days=days)
+        source = "period"
+    else:
+        # --- ③ 정비 이력 기준, 없으면 데이터 앞부분(가정) ----------------------
+        events = config.maintenance_events()
+        if not events.empty:
+            resets = events[events["type"].isin(reset_types)]
+            resets = resets[
+                (resets["date"] >= data_start - pd.Timedelta(days=1)) & (resets["date"] <= data_end)
+            ]
+            if not resets.empty:
+                reset_date = resets["date"].iloc[-1]
+                reset_type = str(resets["type"].iloc[-1])
+                source = "maintenance"
+
+        start = max(reset_date, data_start) if reset_date is not None else data_start
+        end = start + pd.Timedelta(days=days)
 
     mask = steady & (df["timestamp"] >= start) & (df["timestamp"] < end)
 
@@ -123,6 +157,15 @@ def select_baseline(ds: Dataset, config: Config) -> Baseline:
         "fuel": _fit(base_df, "fuel_flow", ["flow", "voc_in", "t_in"]),
     }
 
+    warning = None
+    if source == "auto":
+        warning = (
+            "정비 이력도 지정 구간도 없어 데이터 앞부분을 정상으로 가정했습니다. "
+            "이미 오염된 상태에서 수집을 시작했다면 막힘이 과소평가됩니다 — "
+            "config/fleet.yaml 의 baselines 에 정상 구간(period) 또는 설계값(manual)을 지정하고, "
+            "그 전까지는 동급기 대비 지표(A6)를 함께 보십시오."
+        )
+
     return Baseline(
         start=start,
         end=end,
@@ -132,6 +175,41 @@ def select_baseline(ds: Dataset, config: Config) -> Baseline:
         reset_date=reset_date,
         reset_type=reset_type,
         n_samples=int(mask.sum()),
+        source=source,
+        warning=warning,
+    )
+
+
+def _manual_baseline(ds: Dataset, manual: dict, data_start: pd.Timestamp) -> Baseline:
+    """설계값·시운전값을 기준으로 삼는다.
+
+    조건부 기준모델은 학습할 데이터가 없으므로 만들지 않는다. 해당 잔차 기반 지표
+    (B2 배출온도, A3 팬부하, C2 버너듀티, C3 VOC-연료)는 자동으로 채점에서 빠지고
+    남은 지표가 100점을 나눠 갖는다.
+    """
+    refs = {k: float(v) for k, v in manual.items() if isinstance(v, (int, float))}
+    if "ter" not in refs and {"t_comb", "t_in", "t_stack"} <= set(refs):
+        span = refs["t_comb"] - refs["t_in"]
+        if span > 0:
+            refs["ter"] = (refs["t_comb"] - refs["t_stack"]) / span
+    if "dp_norm" not in refs and "dp_bed" in refs:
+        # 기준 조건 자체가 이 값이므로 정규화 차압도 동일하게 둔다
+        refs["dp_norm"] = refs["dp_bed"]
+    if "fuel_intensity" not in refs and {"fuel_flow", "flow"} <= set(refs) and refs["flow"] > 0:
+        refs["fuel_intensity"] = refs["fuel_flow"] / refs["flow"]
+
+    return Baseline(
+        start=data_start,
+        end=data_start,
+        mask=pd.Series(False, index=ds.df.index),
+        refs=refs,
+        models={},
+        n_samples=0,
+        source="manual",
+        warning=(
+            "설계값/시운전값을 기준으로 채점 중입니다. 실측 구간이 없어 조건부 기준모델을 "
+            "학습하지 못했으므로 잔차 기반 지표(A3·B2·C2·C3)는 채점에서 제외됩니다."
+        ),
     )
 
 

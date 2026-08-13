@@ -10,9 +10,14 @@ from rto_health.pipeline import analyze
 
 
 def test_all_indicators_active_with_full_tag_set(normal):
-    """태그가 모두 있으면 15개 지표가 전부 채점되어야 한다."""
+    """단일 설비 분석에서는 A6(동급기 대비)을 뺀 15개가 전부 채점되어야 한다.
+
+    A6 은 같은 계열의 다른 호기가 있어야 산출되므로 단일 설비 경로에서는 제외되고,
+    그 배점은 나머지 지표로 재배분된다.
+    """
     assert len(normal.indicators.active_ids) == 15
-    assert normal.indicators.excluded == {}
+    assert set(normal.indicators.excluded) == {"A6"}
+    assert sum(normal.indicators.effective_points.values()) == pytest.approx(100.0)
 
 
 def test_indicator_raw_metrics_have_expected_direction(normal, rapid):
