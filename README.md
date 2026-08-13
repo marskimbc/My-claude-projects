@@ -244,6 +244,9 @@ df = read_frames("data/monthly/")       # 폴더째 병합 + 중복 제거
 # 대시보드 (20대 통합 / 단일 설비 전환 가능)
 streamlit run app/streamlit_app.py
 
+# 20대 현황판을 HTML 한 장으로 (서버 불필요 — 휴대폰·메신저로 그냥 전송)
+python -m rto_health.export_html -i data/sample/fleet.csv -o 현황판.html
+
 # 한글 점검 리포트 (Markdown)
 python -m rto_health.report -i <단일설비데이터.csv> -o 리포트.md
 
@@ -301,7 +304,8 @@ src/rto_health/
   trend.py       EWMA · Theil-Sen · CUSUM · RUL 외삽
   diagnose.py    고장모드 판정 매트릭스
   calibrate.py   실데이터 기반 가중치 재보정
-  report.py      한글 점검 리포트
+  report.py      한글 점검 리포트 (Markdown)
+  export_html.py 20대 현황판 정적 HTML 내보내기 (자체 완결, 외부 리소스 없음)
   pipeline.py    단일 설비 파이프라인 (prepare / score_prepared 2단계)
 app/             Streamlit 대시보드 (streamlit_app.py · fleet_views.py · theme.py)
 data/sample/     물리 기반 가상 데이터 생성기 (단일 · 20대 통합)
