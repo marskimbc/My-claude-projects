@@ -1,0 +1,337 @@
+# ---------------------------------------------------------------------------
+# 축열재 막힘 채점 모델 — 100점 배점표 및 임계치
+# ---------------------------------------------------------------------------
+# 건전도 = 100 - Σ( 지표별 열화도(0~1) × 배점 )
+#   · 건전도 100점 = 신품/세정 직후 수준,  0점 = 완전 막힘
+#
+# 열화도 산출: 각 지표의 raw metric 을 onset~severe 구간에서 0~1 로 선형 사상.
+#   metric <= onset  → 열화도 0   (정상)
+#   metric >= severe → 열화도 1   (배점 전액 감점)
+#
+# 배점 근거: 막힘과의 인과 근접도 순서
+#   A 유동저항(직접 증거) > B 열교환 성능(결과) > C 에너지(결과) > D 누적 부하(원인 스트레스)
+#
+# ※ 초기값은 RTO 물리/정비 문헌 기반의 공학적 추정치이며 통계 검증값이 아니다.
+#    실제 운전 이력이 확보되면 calibrate.py 로 재보정할 것.
+# ---------------------------------------------------------------------------
+
+version: 1
+score_direction: health      # health = 100점이 정상
+
+# --- 물리 보정 파라미터 ----------------------------------------------------
+physical:
+  # ΔP_norm = ΔP × (Q_ref/Q)^n × (T_ref/T_gas)
+  # n: 축열재 형상에 따라 다름 (허니컴=층류≈1.0, 랜덤새들=난류≈2.0).
+  #    null 이면 베이스라인 구간 데이터에서 회귀로 자동 피팅한다.
+  flow_exponent: null
+  flow_exponent_default:
+    honeycomb: 1.15
+    saddle: 1.85
+  flow_exponent_bounds: [0.8, 2.2]
+  # 기준 조건. null 이면 베이스라인 구간 중앙값을 사용.
+  ref_flow_cmm: null
+  ref_gas_temp_c: null
+
+# --- 베이스라인(정상 기준) 구간 선정 ---------------------------------------
+baseline:
+  days_after_maintenance: 14   # 마지막 세정/교체 후 N일을 정상 기준으로 사용
+  min_samples: 300             # 이보다 적으면 데이터 앞부분으로 대체
+  reset_event_types: [full_clean, media_replace]
+
+# --- 정상 운전 구간 필터 (기동/정지/저부하 제외) ----------------------------
+steady_state:
+  min_flow_ratio: 0.35         # 설계 풍량 대비
+  min_comb_temp_c: 700
+  warmup_minutes: 60           # 기동 후 제외 시간
+  max_comb_temp_dev_c: 80      # 설정치 대비 편차가 이보다 크면 과도상태
+
+# --- 추세 분석 -------------------------------------------------------------
+trend:
+  ewma_span_hours: 24
+  slope_windows_days: [7, 30, 90]
+  cusum_k_sigma: 0.5           # CUSUM 여유(허용 드리프트)
+  # CUSUM 임계. 3개 시나리오로 튜닝한 값 — 6.0 에서 정상 운전 오알람 0건이면서
+  # 급성 막힘을 발생 10일 내 검출한다. 낮추면 조기검출↑ 오알람↑.
+  cusum_h_sigma: 6.0
+  rul_min_slope_ratio_per_day: 1.0e-5   # 이보다 완만하면 RUL 산출 생략
+  rul_fit_window_days: 60
+
+# ---------------------------------------------------------------------------
+# 지표 정의 — 배점 합계 100점
+# ---------------------------------------------------------------------------
+groups:
+  A: {name: 유동저항, points: 45, description: 막힘의 직접 증거}
+  B: {name: 열교환 성능, points: 25, description: 축열 기능 저하의 결과}
+  C: {name: 에너지·처리 성능, points: 20, description: 운전비·처리효율 악화}
+  D: {name: 누적 오염 부하, points: 10, description: 막힘을 유발하는 누적 스트레스}
+
+indicators:
+
+  # ===== A군. 유동저항 — 45점 =============================================
+  A1:
+    group: A
+    name: 정규화 베드 차압
+    points: 18
+    metric: dp_norm_ratio
+    unit: 배
+    description: 풍량·온도 보정 차압의 베이스라인 대비 비율. 막힘의 가장 직접적인 증거.
+    onset: 1.10
+    severe: 2.00
+    requires: [dp_bed, flow]
+
+  A2:
+    group: A
+    name: 차압 상승 기울기
+    points: 10
+    metric: dp_norm_slope_per_day
+    unit: 배/일
+    description: 30일 Theil-Sen robust 기울기. 현재 수준보다 "얼마나 빨리 나빠지는가".
+    onset: 0.0005      # 0.05 %/일 ≈ 18 %/년
+    severe: 0.0100     # 1.0 %/일  ≈ 두 달 만에 한계 도달
+    requires: [dp_bed, flow]
+
+  A3:
+    group: A
+    name: 송풍기 부하 상승
+    points: 8
+    metric: fan_load_ratio
+    unit: 배
+    description: 동일 풍량 기준 인버터 주파수(또는 전류)의 베이스라인 대비 비율.
+    onset: 1.03
+    severe: 1.20
+    requires: [flow]
+    requires_any: [fan_hz, fan_amp]   # 인버터 신호가 없으면 전류로 대체 산출
+
+  A4:
+    group: A
+    name: 댐퍼 개도 여유 감소
+    points: 5
+    metric: damper_open_pct
+    unit: '%'
+    description: 목표 풍량 유지를 위해 개도를 계속 열고 있다면 여유가 소진된 것.
+    onset: 60
+    severe: 95
+    requires: [damper_pct]
+
+  A5:
+    group: A
+    name: 차압 변동성
+    points: 4
+    metric: dp_cv
+    unit: 변동계수
+    description: 차압 이동표준편차/평균. 국부 폐쇄·채널링 시 맥동이 커진다.
+    onset: 0.03
+    severe: 0.15
+    requires: [dp_bed]
+
+  # ===== B군. 열교환 성능 — 25점 ===========================================
+  B1:
+    group: B
+    name: 열회수효율(TER) 저하
+    points: 10
+    metric: ter_drop_pp
+    unit: '%p'
+    description: TER = (T_comb - T_stack)/(T_comb - T_in). 베이스라인 대비 하락 폭.
+    onset: 1.0
+    severe: 8.0
+    requires: [t_comb, t_in, t_stack]
+
+  B2:
+    group: B
+    name: 스택 배출온도 상승
+    points: 6
+    metric: stack_temp_rise_c
+    unit: degC
+    description: 동일 운전조건 기준모델 대비 배출온도 상승분. 축열 성능 소실의 신호.
+    onset: 5
+    severe: 60
+    requires: [t_stack]
+
+  B3:
+    group: B
+    name: 섹터 간 출구온도 편차
+    points: 5
+    metric: sector_temp_std_c
+    unit: degC
+    description: 섹터별 출구온도 표준편차. 특정 섹터만 막히면(채널링) 급격히 커진다.
+    onset: 8
+    severe: 40
+    requires: [t_sector]
+
+  B4:
+    group: B
+    name: 연소실 온도 안정성
+    points: 4
+    metric: comb_temp_instability_c
+    unit: degC
+    description: 설정치 대비 편차의 이동표준편차. 유동 불균일 시 제어 헌팅이 커진다.
+    onset: 5
+    severe: 25
+    requires: [t_comb]
+
+  # ===== C군. 에너지·처리 성능 — 20점 ======================================
+  C1:
+    group: C
+    name: 연료 원단위 상승
+    points: 8
+    metric: fuel_intensity_ratio
+    unit: 배
+    # 주의: 연료는 증폭 지표다. 열회수효율이 1%p 떨어지면 보조연료는 20~30% 늘어난다.
+    # 따라서 severe 를 좁게 잡으면 초기 열화에서 곧바로 만점 감점되어 분해능을 잃는다.
+    description: 단위 처리풍량당 연료 사용량의 베이스라인 대비 비율.
+    onset: 1.08
+    severe: 2.00
+    requires: [fuel_flow, flow]
+
+  C2:
+    group: C
+    name: 버너 가동률 상승
+    points: 5
+    metric: burner_duty_ratio
+    unit: 배
+    description: 동일 VOC 부하 대비 버너 on-time 비율.
+    onset: 1.05
+    severe: 1.50
+    requires: [burner_duty]
+
+  C3:
+    group: C
+    name: VOC-연료 괴리
+    points: 4
+    metric: voc_fuel_residual_sigma
+    unit: sigma
+    description: 유입 VOC 가 높으면 연료는 줄어야 정상. 회귀 잔차가 크면 열수지 이상.
+    onset: 1.5
+    severe: 5.0
+    requires: [voc_in, fuel_flow]
+
+  C4:
+    group: C
+    name: 배출농도 악화
+    points: 3
+    metric: outlet_voc_ratio
+    unit: 배
+    description: TMS 배출농도의 베이스라인 대비 비율. 체류시간 단축·편류 시 상승.
+    onset: 1.2
+    severe: 3.0
+    requires: [voc_out]
+
+  # ===== D군. 누적 오염 부하 — 10점 ========================================
+  D1:
+    group: D
+    name: 누적 VOC 부하
+    points: 5
+    metric: cum_voc_load_ratio
+    unit: 배
+    description: 마지막 세정 이후 ∫(VOC농도 × 풍량)dt 를 설계 부하로 나눈 값.
+    onset: 0.5
+    severe: 1.5
+    requires: [voc_in, flow]
+
+  D2:
+    group: D
+    name: 누적 운전시간
+    points: 5
+    metric: cum_runtime_ratio
+    unit: 배
+    description: 마지막 세정 이후 누적 운전시간 / 권장 세정 주기.
+    onset: 0.6
+    severe: 1.5
+    requires: []
+
+# ---------------------------------------------------------------------------
+# 등급 판정
+# ---------------------------------------------------------------------------
+grades:
+  - {grade: A, min_score: 90, label: 정상,      action: 일상 점검 유지}
+  - {grade: B, min_score: 75, label: 초기 열화, action: 추세 감시 강화 · 차압 주간 기록}
+  - {grade: C, min_score: 60, label: 진행,      action: bake-out 계획 수립 · 전처리 점검}
+  - {grade: D, min_score: 45, label: 심각,      action: 차기 정지 시 세정 필수 · 예비품 확보}
+  - {grade: E, min_score: 0,  label: 위험,      action: 긴급 정비 — 풍량 부족/라인 정지 임박}
+
+# ---------------------------------------------------------------------------
+# 고장모드 판정 매트릭스 (점검 가이드)
+# ---------------------------------------------------------------------------
+# 각 rule 의 conditions 는 지표 열화도(0~1) 또는 파생 신호에 대한 조건이며
+# 모두 만족할 때 해당 고장모드로 판정한다. priority 가 낮을수록 먼저 평가.
+failure_modes:
+
+  - id: uniform_fouling
+    priority: 20
+    name: 균일 미세 파티클 누적
+    conditions:
+      A1: {min: 0.30}
+      B1: {max: 0.35}
+      B3: {max: 0.30}
+    cause: 유입 분진·미스트가 축열층 전체에 고르게 쌓여 유로 단면이 축소됨.
+    actions:
+      - online bake-out 실시 (승온 후 절환주기 연장, 8시간 이상)
+      - bake-out 후 정규화 차압이 회복되는지 재측정
+      - 전처리 백필터/데미스터 차압 및 포집효율 확인
+
+  - id: channeling
+    priority: 10
+    name: 국부 폐쇄 · 채널링 (타르/실리카 고착)
+    conditions:
+      A1: {min: 0.45}
+      B1: {min: 0.35}
+      B3: {min: 0.40}
+    cause: 특정 섹터가 고착물로 폐쇄되어 가스가 나머지 섹터로 편류. bake-out 으로 회복 불가한 무기물 고착 가능성.
+    actions:
+      - 정지 후 축열재 상부층 육안 점검 (섹터별 폐쇄 상태 확인)
+      - 고압 수세정 또는 상부층 부분 교체 검토
+      - 유입가스 실리콘(Si) 성분 분석 — 실리카 고착이면 세정으로도 회복 안 됨
+      - 섹터별 온도 편차가 가장 큰 섹터부터 우선 점검
+
+  - id: polymer_condensation
+    priority: 15
+    name: VOC 스파이크 후 폴리머 응축
+    conditions:
+      A2: {min: 0.50}
+      D1: {min: 0.30}
+    cause: 고농도 VOC 유입 이후 응축성 유기물이 저온부(축열층 하부)에 급격히 축적.
+    actions:
+      - 공정측 VOC 배출 이력 확인 (도장 부스 오버스프레이, 배치 공정 이상)
+      - 전처리 필터·미스트 제거기 점검 및 교체
+      - 축열층 하부(저온부) 집중 점검 후 bake-out
+      - 재발 방지를 위한 VOC 농도 상한 인터록 검토
+
+  - id: media_settling_or_seal_leak
+    priority: 5
+    name: '⚠️ 막힘 아님 — 축열재 침하/파손 또는 로터리밸브 씰 누설'
+    conditions:
+      A1: {max: 0.20}
+      B1: {min: 0.40}
+      B3: {min: 0.35}
+    cause: 차압은 정상인데 열효율만 떨어졌다면 유로가 막힌 게 아니라 가스가 축열층을 우회하고 있다는 뜻.
+    actions:
+      - 로터리 밸브 씰 마모/간극 점검 (Can type 최빈 고장부)
+      - 축열재 충진 높이 및 침하 여부 확인, 그레이팅 손상 점검
+      - 세정·bake-out 은 효과 없음 — 시행하지 말 것
+      - 밸브 구동부 회전 정밀도 및 섹터 정렬 확인
+
+  - id: media_loss
+    priority: 8
+    name: 축열재 유실 · 바이패스 경로 발생
+    conditions:
+      A1: {max: 0.05}
+      dp_below_baseline: true
+      B1: {min: 0.35}
+    cause: 차압이 베이스라인보다 오히려 낮아지고 효율도 떨어졌다면 축열재가 유실되었거나 큰 우회로가 생긴 것.
+    actions:
+      - 베드 내부 육안 점검 — 충진 높이 저하, 세라믹 파손 확인
+      - 지지 그레이팅 및 하부 배출부 점검
+      - 파손 축열재 잔해가 하류에 쌓였는지 확인
+
+  - id: burner_or_control
+    priority: 30
+    name: 버너 · 제어계 이상 (축열재 무관)
+    conditions:
+      A1: {max: 0.20}
+      B1: {max: 0.25}
+      C1: {min: 0.40}
+    cause: 유동저항과 열교환은 정상인데 연료만 늘었다면 연소 효율 또는 계측 문제.
+    actions:
+      - 버너 공연비 튜닝 및 노즐 점검
+      - 열전대 교정 (연소실/스택 온도계 드리프트 확인)
+      - 연료 유량계 영점 확인

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+
+# 생성된 샘플 데이터 (generate_sample.py 로 재생성 가능)
+data/sample/*.csv

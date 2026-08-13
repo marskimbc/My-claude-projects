@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# 현장 DCS/PLC 태그명 → 시스템 표준 변수명 매핑
+# ---------------------------------------------------------------------------
+# 사용법: 좌변(표준 변수명)은 고정. 우변(source)에 실제 현장 태그명을 적는다.
+#   - source 가 null 이면 "해당 태그 미보유"로 간주하고, 그 태그를 쓰는 지표는
+#     자동으로 배점에서 제외된다(잔여 지표로 100점 재배분).
+#   - unit 은 참고용이며 loader 가 단위 변환을 하지는 않는다.
+# ---------------------------------------------------------------------------
+
+timestamp:
+  source: TIMESTAMP
+  unit: datetime
+  required: true
+
+# --- A군: 유동저항 ---------------------------------------------------------
+dp_bed:
+  source: RTO_DP_BED
+  unit: mmH2O
+  description: 축열재 베드 차압 (막힘의 직접 지표)
+  required: true
+
+dp_total:
+  source: RTO_DP_TOTAL
+  unit: mmH2O
+  description: RTO 계통 전체 차압
+
+flow:
+  source: RTO_FLOW
+  unit: CMM
+  description: 처리 풍량
+  required: true
+
+fan_hz:
+  source: FAN_INV_HZ
+  unit: Hz
+  description: 송풍기 인버터 주파수
+
+fan_amp:
+  source: FAN_CURRENT
+  unit: A
+  description: 송풍기 전류
+
+damper_pct:
+  source: DAMPER_OPEN
+  unit: '%'
+  description: 유량 조절 댐퍼 개도율
+
+# --- B군: 온도 프로파일 ----------------------------------------------------
+t_comb:
+  source: TIC_COMB_PV
+  unit: degC
+  description: 연소실 온도 실측
+  required: true
+
+t_comb_sp:
+  source: TIC_COMB_SP
+  unit: degC
+  description: 연소실 온도 설정치
+
+t_in:
+  source: TT_INLET
+  unit: degC
+  description: 유입가스 온도
+  required: true
+
+t_stack:
+  source: TT_STACK
+  unit: degC
+  description: 배출(스택) 온도
+  required: true
+
+# 섹터별 축열층 출구온도. Can type 은 8~12 섹터.
+# 보유하지 않은 섹터는 source 를 null 로 둔다.
+t_sector:
+  source_prefix: TT_SECTOR_    # 실제 태그: TT_SECTOR_01 ... TT_SECTOR_12
+  count: 12
+  unit: degC
+  description: 섹터별 축열층 출구온도 (채널링 판정의 핵심)
+
+# --- C군: 연료 / 효율 / VOC ------------------------------------------------
+fuel_flow:
+  source: FUEL_LNG_FLOW
+  unit: Nm3/h
+  description: 보조연료(LNG) 사용량
+
+burner_duty:
+  source: BURNER_DUTY
+  unit: '%'
+  description: 버너 가동률
+
+voc_in:
+  source: VOC_INLET
+  unit: ppm
+  description: 유입 VOC 농도
+
+voc_out:
+  source: TMS_OUTLET
+  unit: ppm
+  description: 배출 VOC 농도 (TMS)
+
+# --- 보조 -----------------------------------------------------------------
+ambient_temp:
+  source: AMBIENT_TEMP
+  unit: degC
+  description: 외기 온도 (계절 보정용, 선택)

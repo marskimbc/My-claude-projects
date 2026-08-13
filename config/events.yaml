@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------------
+# 설비 제원 및 정비 이력 (수기 입력)
+# ---------------------------------------------------------------------------
+# 정비 이력 태그가 DCS 에 없으므로 담당자가 직접 관리한다.
+# 베이스라인(정상 기준) 구간은 가장 최근의 full_clean / media_replace 일자
+# 이후 구간에서 자동 선정된다.
+# ---------------------------------------------------------------------------
+
+equipment:
+  name: 대양 RTO #1
+  type: Can type (Rotary 1-Can)
+  media_type: honeycomb        # honeycomb | saddle  (차압-유량 지수 초기값 결정)
+  sector_count: 12
+  design_flow_cmm: 1000
+  design_max_dp_mmh2o: 250     # 이 값 도달 = 운전 한계. RUL 산출 기준.
+  recommended_cleaning_interval_h: 8760   # 권장 세정 주기 (D2 지표 기준)
+  # 세정 주기당 설계 누적 VOC 부하 (D1 기준).
+  # 대략값 = 설계 VOC 농도(ppm) × 설계 풍량(CMM) × 권장 세정 주기(h)
+  #        = 300 × 850 × 8760 ≈ 2.2e9
+  design_voc_load_ppm_cmm_h: 2.3e+9
+
+# 정비 이력. type: full_clean | media_replace | partial_replace | bakeout | inspection
+maintenance_events:
+  - date: 2025-01-06
+    type: full_clean
+    note: 축열재 전량 수세정 후 재장입
+  - date: 2025-05-19
+    type: bakeout
+    note: online bake-out 8시간
+  - date: 2025-09-22
+    type: bakeout
+    note: online bake-out 8시간
